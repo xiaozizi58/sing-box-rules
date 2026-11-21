@@ -1,0 +1,90 @@
+name: Sync ChatGPT voice rules
+
+on:
+  schedule:
+    - cron: '17 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-chatgpt-voice
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Fetch and compile the official rule set
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp=$(mktemp -d)
+          trap 'rm -rf -- "$tmp"' EXIT
+          package=sing-box-1.14.4-linux-amd64
+          curl --fail --silent --show-error --location --retry 2 --max-time 120 \
+            "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/$package.tar.gz" \
+            --output "$tmp/sing-box.tar.gz"
+          printf '%s  %s\n' \
+            '699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968' \
+            "$tmp/sing-box.tar.gz" | sha256sum --check
+          tar -xzf "$tmp/sing-box.tar.gz" -C "$tmp" "$package/sing-box"
+
+          curl --fail --silent --show-error --location --retry 2 --max-time 30 \
+            https://openai.com/chatgpt-voice.json --output "$tmp/upstream.json"
+
+          python3 - "$tmp/upstream.json" "$tmp/rules.json" <<'PYTHON'
+          import ipaddress
+          import json
+          import sys
+          from pathlib import Path
+
+          upstream = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          entries = upstream["prefixes"]
+          if not isinstance(entries, list) or not entries:
+              raise ValueError("The upstream prefix list must be a non-empty array")
+
+          networks = set()
+          for entry in entries:
+              if not isinstance(entry, dict):
+                  raise ValueError(f"Invalid prefix entry: {entry!r}")
+              fields = set(entry) & {"ipv4Prefix", "ipv6Prefix"}
+              if len(fields) != 1:
+                  raise ValueError(f"Invalid prefix fields: {entry!r}")
+              field = fields.pop()
+              value = entry[field]
+              if not isinstance(value, str) or "/" not in value:
+                  raise ValueError(f"Expected a CIDR prefix: {entry!r}")
+              network = ipaddress.ip_network(value)
+              expected_version = 4 if field == "ipv4Prefix" else 6
+              if network.version != expected_version:
+                  raise ValueError(f"Address family does not match field: {entry!r}")
+              networks.add(str(network))
+
+          result = {"version": 1, "rules": [{"ip_cidr": sorted(networks)}]}
+          Path(sys.argv[2]).write_text(json.dumps(result) + "\n", encoding="utf-8")
+          print(f"Validated {len(networks)} unique voice prefixes")
+          PYTHON
+
+          "$tmp/$package/sing-box" rule-set compile "$tmp/rules.json" -o "$tmp/chatgpt-voice.srs"
+          test -s "$tmp/chatgpt-voice.srs"
+          cp -- "$tmp/chatgpt-voice.srs" chatgpt-voice.srs
+
+      - name: Publish changed rules
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -- chatgpt-voice.srs
+          if git diff --cached --quiet -- chatgpt-voice.srs; then
+            echo "Voice rule set is unchanged."
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Update ChatGPT voice rule set' -- chatgpt-voice.srs
+          git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
