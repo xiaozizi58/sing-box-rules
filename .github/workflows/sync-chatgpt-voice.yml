@@ -75,16 +75,17 @@ jobs:
           test -s "$tmp/chatgpt-voice.srs"
           cp -- "$tmp/chatgpt-voice.srs" chatgpt-voice.srs
 
-      - name: Publish changed rules
+      - name: Publish changed rules or monthly check
         shell: bash
         run: |
           set -euo pipefail
-          git add -- chatgpt-voice.srs
-          if git diff --cached --quiet -- chatgpt-voice.srs; then
-            echo "Voice rule set is unchanged."
+          TZ=Asia/Shanghai date +%Y-%m > last-successful-sync-month.txt
+          git add -- chatgpt-voice.srs last-successful-sync-month.txt
+          if git diff --cached --quiet -- chatgpt-voice.srs last-successful-sync-month.txt; then
+            echo "Voice rule set and monthly check are unchanged."
             exit 0
           fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'Update ChatGPT voice rule set' -- chatgpt-voice.srs
+          git commit -m 'Sync ChatGPT voice rules' -- chatgpt-voice.srs last-successful-sync-month.txt
           git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"
